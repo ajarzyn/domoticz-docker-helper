@@ -1,0 +1,252 @@
+#!/bin/bash
+
+# TO DO think to rather add PATH than choose proper docker binary path
+# echo $PATH
+
+# Get user UID and GID
+PUID=$(id -u $USER)
+GUID=$(id -g $USER)
+
+if [ $PUID -eq 0 ] ; then
+	echo "Do not run script with sudo. It will be requested if necessary."
+	exit 1
+fi
+
+function usage
+{
+	ECHO_F="echo -e"
+	$ECHO_F "Usage: $0 [OPTION] ... "
+	$ECHO_F "-nb,  --no-build\t\tDo not build image."
+	$ECHO_F "-nc,  --no-create\t\tDoes not create container locally."
+	$ECHO_F "-ct,  --create-test\t\tCreate test container with different ports."
+	$ECHO_F "-dp,  --debug-python\t\tAdd port to container for  debuging python plugins."
+	$ECHO_F "-ex,  --export-image\t\tExport image to file. And copy file to server."
+	$ECHO_F "-ui,  --upload-image\t\tUpload image to the server docker image repository."
+	$ECHO_F "-li,  --load-image [filename]\tLoad docker image from file to docker image repository."
+	$ECHO_F "-lp,  --local-passwd\t\tPass local user password as and argument."
+	$ECHO_F "-sp,  --server-passwd\t\tPass server user password as and argument."
+	$ECHO_F "-h,   --help\t\t\tDisplays this help."
+	$ECHO_F "\t"
+	exit 0
+}
+
+NO_BUILD=0
+NO_CREATE=0
+CREATE_TEST=0
+DEBUG_PYTHON=0
+EXPORT_IMAGE=0
+UPLOAD_IMAGE=0
+LOAD_IMAGE=0
+
+while [ "$1" != "" ] ; do
+	case $1 in
+		-nb  | --no-build )		NO_BUILD=1
+						;;
+		-nc  | --no-create )		NO_CREATE=1
+						;;
+		-ct  | --create-test )		CREATE_TEST=1
+						;;					
+		-dp  | -debug-python )		DEBUG_PYTHON=1
+						;;
+		-ex  | -export-image )		EXPORT_IMAGE=1
+						;;
+		-ui  | -upload-image )		UPLOAD_IMAGE=1
+						;;
+		-li  | -laod-image )		LOAD_IMAGE=1
+						IMAGE_FILE_TO_LOAD=$2
+						shift
+						;;
+		-lp  | -local-passwd )		LOC_PASS=$2
+						shift
+						;;
+		-sp  | -server-passwd )		SRV_PASS=$2
+						shift
+						;;
+		-h   | --help )			usage
+						exit 0
+						;;
+		* )				usage
+						exit 1
+	esac
+	shift
+done
+
+# Script variables
+
+DOCKER_POSSIBLE_PATHS=("docker" "/usr/bin/docker" "/usr/local/bin/docker")
+for D_P in "${DOCKER_POSSIBLE_PATHS[@]}"
+do
+	if [ -f $D_P ] ; then
+		V_DOCKER_PATH=$D_P
+		break
+	fi
+done
+echo docker path set to: "$V_DOCKER_PATH"
+
+if [ -z "$V_DOCKER_PATH" ] ; then
+	echo "No docker binary have been found."
+	exit 1
+fi
+
+# Get local password if neccessary and set sudo
+function locl_sudo() {
+	echo ${LOC_PASS} | sudo -S $@
+}
+
+function DOCKER_PATH(){
+	# echo "DOCKER_PATH function is called."
+	# echo $V_DOCKER_PATH $@
+	if [ $SUDO_NEEDED -eq 1 ] ; then
+		locl_sudo "$V_DOCKER_PATH $@"
+	else
+		$V_DOCKER_PATH "$@"
+	fi
+}
+
+SUDO_NEEDED=0
+DOCKER_PATH images > /dev/null
+if [ $? -eq 1 ] ; then
+	SUDO_NEEDED=1
+	if [ -z "$LOC_PASS" ] ; then
+		echo "Enter local user sudo password."
+		read -s LOC_PASS
+	fi
+
+	DOCKER_PATH images > /dev/null
+	if [ $? -eq 1 ] ; then
+		echo "No permission to run docker."
+		exit 1
+	fi
+fi
+
+# Get server password if neccessary
+if [ -z "$SRV_PASS" ] && [ $UPLOAD_IMAGE -eq 1 ] || [ $EXPORT_IMAGE -eq 1 ]  ; then
+	echo "Insert password for server usr."
+	read -s SRV_PASS
+fi
+
+
+D_IMAGE="DOCKER_PATH image"
+D_CONT="DOCKER_PATH container"
+D_CREATE="DOCKER_PATH create"
+D_BUILD="DOCKER_PATH build"
+D_SAVE="DOCKER_PATH save"
+D_LOAD="DOCKER_PATH load"
+D_TAG="DOCKER_PATH tag"
+D_IMG_CREATION_DATE=(DOCKER_PATH inspect -f "{{.Created}}")
+
+# Server paramteres
+IP="" # IP of the server
+SSH_PORT="" # Port for ssh 
+USER="" # NAS/Server user
+SERVER_PATH="" # Path for domoticz where is config file (in which there is db/plugins)
+SERVER_SCRIPT_PATH="${SERVER_PATH}domoticzDockerCreate"
+
+
+
+# Docker environment
+TZ="Europe/Warsaw"
+if [ $CREATE_TEST -eq 0 ] ; then
+	CONT_NAME=domoticz
+	WEB_PORT=8080
+	C1_PORT=6144
+	C2_PORT=1443
+else
+	CONT_NAME=domoticz_test
+	WEB_PORT=8090
+	C1_PORT=6244
+	C2_PORT=1543
+fi
+
+IMAGE=domoticz/local
+D_IMG_CREATION_DATE+=($IMAGE)
+MP="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
+PLUGINS_PATH=$MP/plugins
+CONFIG_PATH=$MP/config
+LOG_PATH=$MP/logs
+DB_PATH=$MP/db
+
+exists () {
+	$1 ls -a | grep "$2"
+}
+
+if [ $NO_BUILD -eq 0 ] ; then
+	#Backup old image and build new
+	TAG=$("${D_IMG_CREATION_DATE[@]}")
+	TAG=$(date -d $TAG +'%Y%m%d%H%M%S')
+	$D_TAG $IMAGE $IMAGE:$TAG
+	$D_BUILD --tag $IMAGE:latest .
+	if [ 0 -ne $? ] ; then
+		echo "Error while building an image. Docker build exited with $? code."
+		exit 1
+	fi
+fi
+
+
+if [ $LOAD_IMAGE -eq 1 ] ; then
+	TAG=$("${D_IMG_CREATION_DATE[@]}")
+	TAG=$(date -d $TAG +'%Y%m%d%H%M%S')
+	$D_TAG $IMAGE $IMAGE:$TAG
+	$D_LOAD -o $IMAGE_FILE_TO_LOAD
+fi
+
+if [ $NO_CREATE -ne 1 ] ; then
+	exists "$D_CONT" $CONT_NAME
+	if [ 0 -eq $? ] ; then
+		$D_CONT stop $CONT_NAME
+		$D_CONT rm $CONT_NAME
+	fi
+
+	CREATE_COMMAND="$D_CREATE \
+		--name=$CONT_NAME \
+		-e PUID=$PUID \
+		-e GUID=$GUID \
+		-e TZ=$TZ \
+		-p $WEB_PORT:$WEB_PORT \
+		-p $C1_PORT:$C1_PORT \
+		-p $C2_PORT:$C2_PORT \
+		--restart=always"
+	if [ -e "/dev/ttyACM0" ] ; then
+		CREATE_COMMAND=$CREATE_COMMAND" --device=/dev/ttyACM0"
+	fi
+	if [ $DEBUG_PYTHON -eq 1 ] ; then
+		CREATE_COMMAND=$CREATE_COMMAND" -p 4444:4444"
+	fi
+	CREATE_COMMAND=$CREATE_COMMAND" -v $CONFIG_PATH:/config \
+		$IMAGE"
+	
+	# echo $CREATE_COMMAND
+	$CREATE_COMMAND
+
+	exists "$D_CONT" $CONT_NAME
+	if [ 0 -eq $? ] ; then
+		echo "Creating container named: $CONT_NAME succeed."
+		$D_CONT start $CONT_NAME
+	else
+		echo "Failed to create container."
+	fi
+fi # if [ $NO_CTEATE -ne 1 ]
+
+TAG=$("${D_IMG_CREATION_DATE[@]}")
+TAG=$(date -d $TAG +'%Y%m%d%H%M%S')
+EXPORTED_FILE="${TAG}_${CONT_NAME}.img"
+
+if [ $EXPORT_IMAGE -eq 1 ] ; then
+	$D_SAVE -o $EXPORTED_FILE $IMAGE":latest"
+	echo "You will copy docker image on server. You will be prompted for server user's password."
+	SCP=$SRV_SUDO"scp -P $SSH_PORT $EXPORTED_FILE $USER@$IP:$SERVER_PATH"
+	echo $SCP
+	$SCP
+fi
+
+if [ $UPLOAD_IMAGE -eq 1 ] ; then
+	SSH_COMMAND="sshpass -p ${SRV_PASS} ssh -t ${USER}@${IP} -p ${SSH_PORT} "
+	echo "Removing script file from server."
+	${SSH_COMMAND}rm -f $SERVER_SCRIPT_PATH
+	echo "Copy script to the server."
+	sshpass -p ${SRV_PASS} scp -P $SSH_PORT $0 $USER@$IP:$SERVER_PATH
+	echo "Run script on server."
+	${SSH_COMMAND}"chmod +x $SERVER_SCRIPT_PATH; $SERVER_SCRIPT_PATH -nb -li $EXPORTED_FILE -lp ${SRV_PASS}"
+fi
+
