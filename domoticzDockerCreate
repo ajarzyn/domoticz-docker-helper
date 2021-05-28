@@ -23,6 +23,7 @@ function usage
 	$ECHO_F "-ex,  --export-image\t\tExport image to file. And copy file to server."
 	$ECHO_F "-ui,  --upload-image\t\tUpload image to the server docker image repository."
 	$ECHO_F "-li,  --load-image [filename]\tLoad docker image from file to docker image repository."
+	$ECHO_F "-tg,  --tag\t\tSupply tag of the image to be loaded format [:tag]"
 	$ECHO_F "-lp,  --local-passwd\t\tPass local user password as and argument."
 	$ECHO_F "-sp,  --server-passwd\t\tPass server user password as and argument."
 	$ECHO_F "-h,   --help\t\t\tDisplays this help."
@@ -45,21 +46,25 @@ while [ "$1" != "" ] ; do
 		-nc  | --no-create )		NO_CREATE=1
 						;;
 		-ct  | --create-test )		CREATE_TEST=1
+						TEST=-ct
 						;;					
-		-dp  | -debug-python )		DEBUG_PYTHON=1
+		-dp  | --debug-python )		DEBUG_PYTHON=1
 						;;
-		-ex  | -export-image )		EXPORT_IMAGE=1
+		-ex  | --export-image )		EXPORT_IMAGE=1
 						;;
-		-ui  | -upload-image )		UPLOAD_IMAGE=1
+		-ui  | --upload-image )		UPLOAD_IMAGE=1
 						;;
-		-li  | -laod-image )		LOAD_IMAGE=1
+		-li  | --laod-image )		LOAD_IMAGE=1
 						IMAGE_FILE_TO_LOAD=$2
 						shift
 						;;
-		-lp  | -local-passwd )		LOC_PASS=$2
+		-tg  | --tag )			IMG_TAG=$2
 						shift
 						;;
-		-sp  | -server-passwd )		SRV_PASS=$2
+		-lp  | --local-passwd )		LOC_PASS=$2
+						shift
+						;;
+		-sp  | --server-passwd )	SRV_PASS=$2
 						shift
 						;;
 		-h   | --help )			usage
@@ -125,7 +130,6 @@ if [ -z "$SRV_PASS" ] && [ $UPLOAD_IMAGE -eq 1 ] || [ $EXPORT_IMAGE -eq 1 ]  ; t
 	read -s SRV_PASS
 fi
 
-
 D_IMAGE="DOCKER_PATH image"
 D_CONT="DOCKER_PATH container"
 D_CREATE="DOCKER_PATH create"
@@ -136,16 +140,15 @@ D_TAG="DOCKER_PATH tag"
 D_IMG_CREATION_DATE=(DOCKER_PATH inspect -f "{{.Created}}")
 
 # Server paramteres
-IP="" # IP of the server
-SSH_PORT="" # Port for ssh 
-USER="" # NAS/Server user
-SERVER_PATH="" # Path for domoticz where is config file (in which there is db/plugins)
-SERVER_SCRIPT_PATH="${SERVER_PATH}domoticzDockerCreate"
-
+source config.sh
 
 
 # Docker environment
 TZ="Europe/Warsaw"
+CNT_WEB_PORT=8080
+CNT_C1_PORT=6144
+CNT_C2_PORT=1443
+
 if [ $CREATE_TEST -eq 0 ] ; then
 	CONT_NAME=domoticz
 	WEB_PORT=8080
@@ -159,7 +162,8 @@ else
 fi
 
 IMAGE=domoticz/local
-D_IMG_CREATION_DATE+=($IMAGE)
+LATEST_TAG=:latest
+D_IMG_CREATION_DATE+=($IMAGE$IMG_TAG)
 MP="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
 PLUGINS_PATH=$MP/plugins
@@ -171,24 +175,32 @@ exists () {
 	$1 ls -a | grep "$2"
 }
 
-if [ $NO_BUILD -eq 0 ] ; then
+change_latest_image_tag () {
 	#Backup old image and build new
+	# OLD_TAG=$("${D_IMG_CREATION_DATE[@]}") | sed "s/[^[:alnum:]-]//g"
 	TAG=$("${D_IMG_CREATION_DATE[@]}")
-	TAG=$(date -d $TAG +'%Y%m%d%H%M%S')
-	$D_TAG $IMAGE $IMAGE:$TAG
-	$D_BUILD --tag $IMAGE:latest .
+	OLD_TAG=$(date -d $TAG +'%Y%m%d%H%M%S')
+	echo "$OLD_TAG"
+	if [ -z "$OLD_TAG" ] ; then
+		$D_TAG $IMAGE$LATEST_TAG $IMAGE:$OLD_TAG
+	fi
+}
+
+if [ $NO_BUILD -eq 0 ] ; then
+	change_latest_image_tag
+	#Build new image
+	$D_BUILD --tag $IMAGE$LATEST_TAG .
 	if [ 0 -ne $? ] ; then
 		echo "Error while building an image. Docker build exited with $? code."
 		exit 1
 	fi
 fi
 
-
 if [ $LOAD_IMAGE -eq 1 ] ; then
-	TAG=$("${D_IMG_CREATION_DATE[@]}")
-	TAG=$(date -d $TAG +'%Y%m%d%H%M%S')
-	$D_TAG $IMAGE $IMAGE:$TAG
-	$D_LOAD -o $IMAGE_FILE_TO_LOAD
+	change_latest_image_tag
+	echo $(pwd)
+	echo $IMAGE_FILE_TO_LOAD
+	$D_LOAD -i $IMAGE_FILE_TO_LOAD
 fi
 
 if [ $NO_CREATE -ne 1 ] ; then
@@ -203,9 +215,9 @@ if [ $NO_CREATE -ne 1 ] ; then
 		-e PUID=$PUID \
 		-e GUID=$GUID \
 		-e TZ=$TZ \
-		-p $WEB_PORT:$WEB_PORT \
-		-p $C1_PORT:$C1_PORT \
-		-p $C2_PORT:$C2_PORT \
+		-p $WEB_PORT:$CNT_WEB_PORT \
+		-p $C1_PORT:$CNT_C1_PORT \
+		-p $C2_PORT:$CNT_C2_PORT \
 		--restart=always"
 	if [ -e "/dev/ttyACM0" ] ; then
 		CREATE_COMMAND=$CREATE_COMMAND" --device=/dev/ttyACM0"
@@ -214,7 +226,7 @@ if [ $NO_CREATE -ne 1 ] ; then
 		CREATE_COMMAND=$CREATE_COMMAND" -p 4444:4444"
 	fi
 	CREATE_COMMAND=$CREATE_COMMAND" -v $CONFIG_PATH:/config \
-		$IMAGE"
+		$IMAGE$IMG_TAG"
 	
 	# echo $CREATE_COMMAND
 	$CREATE_COMMAND
@@ -230,13 +242,13 @@ fi # if [ $NO_CTEATE -ne 1 ]
 
 TAG=$("${D_IMG_CREATION_DATE[@]}")
 TAG=$(date -d $TAG +'%Y%m%d%H%M%S')
-EXPORTED_FILE="${TAG}_${CONT_NAME}.img"
+EXPORTED_FILE="${TAG}_domoticz.img"
 
 if [ $EXPORT_IMAGE -eq 1 ] ; then
-	$D_SAVE -o $EXPORTED_FILE $IMAGE":latest"
+	$D_SAVE -o $EXPORTED_FILE $IMAGE$IMG_TAG
 	echo "You will copy docker image on server. You will be prompted for server user's password."
-	SCP=$SRV_SUDO"scp -P $SSH_PORT $EXPORTED_FILE $USER@$IP:$SERVER_PATH"
-	echo $SCP
+	SCP="sshpass -p ${SRV_PASS} "$SRV_SUDO" scp -P $SSH_PORT $EXPORTED_FILE $USER@$IP:$SERVER_PATH"
+#	echo $SCP
 	$SCP
 fi
 
@@ -247,6 +259,6 @@ if [ $UPLOAD_IMAGE -eq 1 ] ; then
 	echo "Copy script to the server."
 	sshpass -p ${SRV_PASS} scp -P $SSH_PORT $0 $USER@$IP:$SERVER_PATH
 	echo "Run script on server."
-	${SSH_COMMAND}"chmod +x $SERVER_SCRIPT_PATH; $SERVER_SCRIPT_PATH -nb -li $EXPORTED_FILE -lp ${SRV_PASS}"
+	${SSH_COMMAND}"chmod +x $SERVER_SCRIPT_PATH; $SERVER_SCRIPT_PATH -nb $TEST -li $SERVER_PATH$EXPORTED_FILE -lp ${SRV_PASS}"
 fi
 
